@@ -356,8 +356,16 @@ PR 은 트래커와 무관하게 GitHub 에 올라간다. Jira 를 쓰더라도 
 
 ```bash
 node <skill>/scripts/issue-start.mjs route {issue_number} \
-  --kind <frontend|backend|both|neither> [--inferred]
+  --kind <frontend|backend|both|neither> [--inferred] [--files N --lines N]
 ```
+
+**`--files` / `--lines` 는 4단계에서 세운 `plan.md` 의 영향 범위에서 뽑아 넘긴다.**
+route 는 구현 전에 불리므로 실제 diff 는 아직 비어 있다. 추정치를 주지 않으면
+규모가 0 으로 잡혀 화면 변경도 전부 L1 로 떨어지고 **L2 가 도달 불가**가 된다.
+`CHANGE_SCALE_WARN=` 이 나오면 추정치를 빠뜨린 것이다.
+
+구현이 끝난 뒤(9단계) 다시 부르면 인자 없이도 실측값이 잡힌다. 추정과 실측이
+크게 어긋났으면 그 사실을 보고하고 증거 강도를 조정한다.
 
 `--inferred` 는 **완료 기준에 "이렇게 동작할 것이다"라는 추론이 들어 있을 때** 붙인다.
 CSS 오류 복구, 캐시 무효화, 동시성처럼 "그럴 것 같다"가 자주 틀리는 영역이 여기 해당한다.

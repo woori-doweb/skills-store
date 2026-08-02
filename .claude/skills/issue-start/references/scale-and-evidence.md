@@ -89,9 +89,21 @@ raw 이미지 URL 은 비공개 저장소의 이슈 코멘트에서 렌더링되
 ## 계산
 
 ```bash
-node <skill>/scripts/issue-start.mjs route {issue} --kind <성격> [--inferred]
+node <skill>/scripts/issue-start.mjs route {issue} --kind <성격> [--inferred] [--files N --lines N]
 node <skill>/scripts/issue-create.mjs profile          # 프로파일만
 ```
+
+### 규모는 구현 전에 추정해서 넘긴다
+
+`route` 는 3단계에서 불린다. 그 시점의 diff 는 비어 있으므로 잰 값만 믿으면
+규모가 늘 0 이 되고, 화면 변경도 전부 "좁은 범위"로 분류되어 **L2 가 도달 불가**가 된다.
+
+`plan.md` 의 영향 범위에서 파일 수와 줄 수를 뽑아 `--files` / `--lines` 로 넘긴다.
+`CHANGE_SCALE_WARN=` 이 나오면 빠뜨린 것이다.
+
+구현 뒤 9단계에서 인자 없이 다시 부르면 실측값이 잡힌다.
+추정과 실측이 크게 어긋났으면 보고하고 증거 강도를 조정한다 —
+"4파일로 예상했는데 11파일을 고쳤다"는 그 자체로 계획이 틀렸다는 신호다.
 
 프로파일은 한 번 정해 `.issue/settings.json` 에 남고 네 스킬이 같은 값을 읽는다.
 저장소 성격은 자주 바뀌지 않고, 실행마다 값이 흔들리면 증거 기준도 흔들린다.

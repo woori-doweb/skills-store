@@ -455,12 +455,21 @@ function cmdRoute(number, root, opts) {
     isPrivate: typeof repo?.isPrivate === 'boolean' ? repo.isPrivate : null,
   });
   const base = detectBase(root);
-  const scale = changeScale(root, remoteBranchExists(root, detectRemote(root), base) ? `${detectRemote(root)}/${base}` : null);
+  const measured = changeScale(root, remoteBranchExists(root, detectRemote(root), base) ? `${detectRemote(root)}/${base}` : null);
+
+  // route 는 3단계(구현 전)에 불린다. 그 시점의 diff 는 아직 비어 있으므로
+  // 잰 값만 믿으면 규모가 늘 0 이 되고 L2 가 영원히 도달 불가가 된다.
+  // plan.md 의 영향 범위에서 뽑은 추정치를 --files/--lines 로 넘긴다.
+  // 구현 뒤(9단계)에 다시 부르면 인자 없이도 실측값이 잡힌다.
+  const estimated = opts.files !== undefined || opts.lines !== undefined;
+  const files = estimated ? Number(opts.files ?? 0) : measured.files;
+  const lines = estimated ? Number(opts.lines ?? 0) : measured.lines;
+
   const plan = suggestEvidenceLevel({
     profile,
     kind: opts.kind ?? 'neither',
-    files: scale.files,
-    lines: scale.lines,
+    files,
+    lines,
     inferredBehavior: Boolean(opts.inferred),
     isPrivate,
   });
@@ -493,7 +502,10 @@ function cmdRoute(number, root, opts) {
   console.log(`PROFILE=${profile}`);
   console.log(`EVIDENCE_LEVEL=${plan.level}`);
   for (const r of plan.reasons) console.log(`EVIDENCE_REASON=${r}`);
-  console.log(`CHANGE_SCALE=${scale.files}files/${scale.lines}lines${scale.measured ? '' : ' (미측정)'}`);
+  console.log(`CHANGE_SCALE=${files}files/${lines}lines (${estimated ? '추정 — plan.md 기준' : '실측'})`);
+  if (!estimated && measured.files === 0) {
+    console.log('CHANGE_SCALE_WARN=구현 전이라 diff 가 비어 있다. --files/--lines 로 plan.md 의 영향 범위를 넘겨야 L2 판정이 가능하다');
+  }
   console.log(`EMBED_IMAGES=${plan.embedImages ? 1 : 0}`);
   console.log(`MIRROR_EVIDENCE=${plan.mirrorEvidence ? 1 : 0}`);
   console.log(`APPROVAL_GATES=${plan.approvalGates.join(',')}`);
@@ -546,6 +558,8 @@ function main() {
     else if (arg === '--mirrorRef') opts.mirrorRef = argv[++i];
     else if (arg === '--kind') opts.kind = argv[++i];
     else if (arg === '--inferred') opts.inferred = true;
+    else if (arg === '--files') opts.files = argv[++i];
+    else if (arg === '--lines') opts.lines = argv[++i];
     else if (arg.startsWith('-')) {
       console.error(`✗ 알 수 없는 옵션: ${arg}`);
       usage();

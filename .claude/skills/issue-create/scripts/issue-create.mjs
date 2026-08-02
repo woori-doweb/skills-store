@@ -457,4 +457,31 @@ function main() {
 }
 
 import { pathToFileURL } from 'node:url';
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
+import { realpathSync } from 'node:fs';
+
+/**
+ * 직접 실행인지 판별한다.
+ *
+ * 심볼릭 링크나 정션으로 설치된 경우 두 값이 어긋난다.
+ * Node 는 진입 모듈의 `import.meta.url` 을 실제 경로로 풀지만
+ * `process.argv[1]` 은 사용자가 친 링크 경로 그대로다.
+ *
+ *   import.meta.url          file:///C:/Users/me/.gjc/agent/skills/...
+ *   pathToFileURL(argv[1])   file:///C:/Users/me/.claude/skills/...
+ *
+ * 이러면 비교가 영원히 거짓이라 main() 이 조용히 건너뛰어지고 exit 0 으로 끝난다.
+ * 오류도 출력도 없어서 알아채기 가장 어려운 실패다. 양쪽을 realpath 로 맞춰 비교한다.
+ */
+function isDirectRun() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const resolved = path.resolve(entry);
+  if (import.meta.url === pathToFileURL(resolved).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(resolved)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) main();

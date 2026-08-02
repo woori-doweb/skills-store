@@ -41,6 +41,7 @@ import {
   issueDir, evidenceDir, evidenceRel, listEvidence, ensureIgnoreBlock,
   mirrorEvidence, resolveWorktreePath, getWorktreeLayout, syncBaseCheckout, worktreeDisplayPath,
   setTerminalTitle, WORKSPACE_DIR, LEGACY_WORKSPACE_DIR, LEGACY_EVIDENCE_DIR, WORKTREE_LAYOUTS,
+  detectProfile, changeScale, suggestEvidenceLevel,
 } from './issue-common.mjs';
 import {
   createTracker, evidenceUrls, gitHost, setTrackerStatus,
@@ -436,10 +437,75 @@ function cmdMigrate(root, opts) {
 
 /* ------------------------------------------------------------------- main */
 
+/* ------------------------------------------------------------------ route */
+
+/**
+ * 이 이슈에 실제로 필요한 단계만 골라낸다.
+ *
+ * 13단계를 크기와 무관하게 모두 도는 것이 이 스킬군의 가장 큰 낭비였다.
+ * 4줄짜리 문서 수정에 webp 전후 캡처와 기본 브랜치 미러를 강제하면
+ * 절차가 작업보다 커진다. 그렇다고 조용히 건너뛰면 "다 했다"로 읽혀서 더 나쁘다.
+ *
+ * 그래서 뺀 단계를 사유와 함께 출력한다. 줄인 것이 보여야 줄인 것이다.
+ */
+function cmdRoute(number, root, opts) {
+  const repo = gitHost.repoInfo(root);
+  const isPrivate = repo?.isPrivate === true;
+  const { profile } = detectProfile(root, {
+    isPrivate: typeof repo?.isPrivate === 'boolean' ? repo.isPrivate : null,
+  });
+  const base = detectBase(root);
+  const scale = changeScale(root, remoteBranchExists(root, detectRemote(root), base) ? `${detectRemote(root)}/${base}` : null);
+  const plan = suggestEvidenceLevel({
+    profile,
+    kind: opts.kind ?? 'neither',
+    files: scale.files,
+    lines: scale.lines,
+    inferredBehavior: Boolean(opts.inferred),
+    isPrivate,
+  });
+
+  // 단계 이름이 레벨을 드러내야 한다. L1 인데 "증거 캡처"라고 적어 두면
+  // 실측으로 끝날 일에 다시 webp 를 만들게 된다.
+  const evidenceWord = plan.level === 'L2' ? '캡처 (webp + 바운딩 박스)' : '실측 (수치 기록)';
+
+  const steps = [
+    ['1', '인자 분기 및 전제 확인', true, null],
+    ['2', '이슈 수집', true, null],
+    ['3', '작업 성격 판정', true, null],
+    ['4', '코드베이스 대조 분석 + plan.md', true, null],
+    ['5', '워크트리 생성', true, null],
+    ['6', `before ${evidenceWord}`, plan.level !== 'L0', plan.level === 'L0' ? 'L0 — 명령 출력이 증거다' : null],
+    ['7', '구현', true, null],
+    ['8', '작업 트리 커밋', true, null],
+    ['9', `after ${evidenceWord}`, plan.level !== 'L0', plan.level === 'L0' ? 'L0 — 명령 출력이 증거다' : null],
+    ['10', '증거 미러 커밋·푸시', plan.mirrorEvidence,
+      plan.mirrorEvidence ? null : (isPrivate ? 'private — raw 이미지가 코멘트에서 렌더링되지 않는다' : `${plan.level} — 미러할 이미지가 없다`)],
+    ['11', '이슈 리포트 코멘트', true, null],
+    ['12', '메인 체크아웃 최신화', plan.mirrorEvidence, plan.mirrorEvidence ? null : '기본 브랜치에 올린 것이 없다'],
+    ['13', '다음 행동 선택', true, null],
+  ];
+
+  for (const [n, name, run, why] of steps) {
+    console.log(`  ${run ? '○' : '─'} ${n.padStart(2)}. ${name}${run ? '' : `   (건너뜀 — ${why})`}`);
+  }
+  console.log('');
+  console.log(`PROFILE=${profile}`);
+  console.log(`EVIDENCE_LEVEL=${plan.level}`);
+  for (const r of plan.reasons) console.log(`EVIDENCE_REASON=${r}`);
+  console.log(`CHANGE_SCALE=${scale.files}files/${scale.lines}lines${scale.measured ? '' : ' (미측정)'}`);
+  console.log(`EMBED_IMAGES=${plan.embedImages ? 1 : 0}`);
+  console.log(`MIRROR_EVIDENCE=${plan.mirrorEvidence ? 1 : 0}`);
+  console.log(`APPROVAL_GATES=${plan.approvalGates.join(',')}`);
+  console.log(`STEPS=${steps.filter(([, , run]) => run).map(([n]) => n).join(',')}`);
+  console.log(`SKIPPED=${steps.filter(([, , run]) => !run).map(([n]) => n).join(',') || '(없음)'}`);
+  console.log(`ISSUE=${number ?? ''}`);
+}
+
 const NEEDS_NUMBER = new Set([
   'fetch', 'worktree', 'evidence-init', 'evidence-commit', 'evidence-mirror', 'evidence-urls', 'report-check',
 ]);
-const MODES = new Set([...NEEDS_NUMBER, 'guard', 'migrate', 'sync-base', 'status']);
+const MODES = new Set([...NEEDS_NUMBER, 'route', 'guard', 'migrate', 'sync-base', 'status']);
 
 function main() {
   const argv = process.argv.slice(2);
@@ -478,6 +544,8 @@ function main() {
     else if (arg === '--repo') opts.repo = argv[++i];
     else if (arg === '--issue') number = parseIssueNumber(argv[++i]);
     else if (arg === '--mirrorRef') opts.mirrorRef = argv[++i];
+    else if (arg === '--kind') opts.kind = argv[++i];
+    else if (arg === '--inferred') opts.inferred = true;
     else if (arg.startsWith('-')) {
       console.error(`✗ 알 수 없는 옵션: ${arg}`);
       usage();
@@ -494,6 +562,9 @@ function main() {
 
   const root = repoRoot();
   switch (mode) {
+    case 'route':
+      cmdRoute(number, root, opts);
+      break;
     case 'fetch': {
       setTerminalTitle(`#${number}`);
       const tracker = createTracker(root, { repo: opts.repo });

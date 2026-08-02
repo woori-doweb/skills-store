@@ -25,6 +25,7 @@ description: GitHub 이슈 번호를 받아 본문·코멘트·첨부 이미지�
   <routing>
     <branch name="이슈 번호 아님" when="$ARGUMENTS 가 작업 설명">references/intake.md — issue-create 위임과 자동 설치</branch>
     <always>references/issue-collection.md — 이슈·코멘트·이미지 수집과 열람</always>
+    <always>references/scale-and-evidence.md — 규모 프로파일과 증거 강도(L0/L1/L2) 판정</always>
     <branch name="frontend" when="라벨/본문/스크린샷이 화면 동작을 가리키거나 UI 계층 변경이 예상됨">
       references/frontend-analysis.md
     </branch>
@@ -49,8 +50,11 @@ description: GitHub 이슈 번호를 받아 본문·코멘트·첨부 이미지�
     <rule>사용자가 정해야 할 것은 전부 AskUserQuestion 으로 묻는다. 평문 질문으로 끝내지 않는다.</rule>
     <rule>커밋은 `guard` 가 통과할 때만 사용자 확인 없이 한다. 실패하면 커밋하지 않고 AskUserQuestion 으로 확인을 받는다.</rule>
     <rule>기본 브랜치에서는 절대 구현하지 않는다. 현재 워크트리에서 브랜치를 갈아타지도 않는다.</rule>
-    <rule>증거는 기본 브랜치에 먼저 커밋·푸시한 뒤 이슈에 코멘트한다. 순서를 뒤집으면 이미지가 렌더링되지 않는다.</rule>
-    <rule>증거 이미지는 webp 로만 만들고, after 에는 변경 구간을 가리키는 바운딩 박스를 넣는다.</rule>
+    <rule>이미지를 이슈에 싣는 경우에만 기본 브랜치 미러가 필요하다. 미러할 때는 코멘트보다 먼저 푸시한다 — 순서를 뒤집으면 이미지가 깨진다.
+      `route` 가 `MIRROR_EVIDENCE=0` 을 주면(private 저장소이거나 L2 가 아니면) 미러 단계 자체가 없다.</rule>
+    <rule>증거 강도는 `route` 가 정한다. L2 일 때만 webp 와 바운딩 박스를 만들고, L1 은 수치로, L0 은 명령 출력으로 끝낸다.
+      숫자로 증명되는 것을 그림으로 한 번 더 보여주는 것은 반복이지 증거가 아니다.</rule>
+    <rule>같은 내용을 이슈 본문·증거 코멘트·PR 본문에 세 번 쓰지 않는다. `comment.md` 가 결과 정본이고 PR 본문은 그것을 링크한다.</rule>
     <rule>첨부 이미지는 요약만 믿지 않고 Read 로 직접 열어본다.</rule>
     <rule>이슈 상태 변경, PR 생성, merge 를 하지 않는다. 각각 issue-end 와 issue-merge 의 몫이다.</rule>
     <rule>사용자에게 말을 걸 때는 — 전이 보고든 질문이든 — 현재 단계를 반드시 함께 밝힌다.
@@ -78,6 +82,11 @@ description: GitHub 이슈 번호를 받아 본문·코멘트·첨부 이미지�
 
   <next>
     끝날 때는 항상 다음에 무엇을 할지 골라 준다. references/next-actions.md 의 4지선다를 그대로 쓴다.
+
+    (권장) 은 다음 스킬에 자동으로 붙지 않는다. 남은 작업이 있으면 계속하는 쪽이,
+    사용자가 원래 요청한 산출물이 이미 나왔으면 종료하는 쪽이 (권장) 이다.
+    이 체인은 스킬마다 다음 스킬을 제시하므로, 기본값을 계속 진행으로 두면
+    "검증만 해 달라"는 요청이 이슈·PR·merge 까지 흘러간다. 판단해서 붙인다.
   </next>
 </skill>
 
@@ -340,23 +349,52 @@ PR 은 트래커와 무관하게 GitHub 에 올라간다. Jira 를 쓰더라도 
 
 ## 1단계 — 체크리스트 생성
 
-TodoWrite 로 아래 13개를 만든다. **단계가 끝날 때마다 즉시 완료로 갱신한다.**
+**13단계를 그대로 다 돌지 않는다.** 어떤 단계가 필요한지는 저장소 규모와 증거 강도가 정한다.
+4줄짜리 수정에 webp 전후 캡처와 기본 브랜치 미러를 붙이면 절차가 작업보다 커진다.
+
+3단계(작업 성격 판정)를 마친 직후 경로를 계산한다. 그전에는 `kind` 를 모르므로 부를 수 없다.
+
+```bash
+node <skill>/scripts/issue-start.mjs route {issue_number} \
+  --kind <frontend|backend|both|neither> [--inferred]
+```
+
+`--inferred` 는 **완료 기준에 "이렇게 동작할 것이다"라는 추론이 들어 있을 때** 붙인다.
+CSS 오류 복구, 캐시 무효화, 동시성처럼 "그럴 것 같다"가 자주 틀리는 영역이 여기 해당한다.
+이 플래그 하나가 증거 강도를 L1 로 올린다. 규모가 작아도 추론이 근거로 쓰이면 그 추론은 재야 한다.
+
+출력의 `STEPS=` 로 TodoWrite 체크리스트를 만든다. **단계가 끝날 때마다 즉시 완료로 갱신한다.**
 
 ```text
-1.  인자 분기 및 전제 확인
-2.  이슈 수집 (본문·코멘트·이미지)
-3.  작업 성격 판정
-4.  코드베이스 대조 분석 + plan.md
-5.  워크트리 생성
-6.  before 증거 캡처 (pure 상태)
-7.  구현
-8.  작업 트리 커밋
-9.  after 증거 캡처 (바운딩 박스 포함)
-10. 증거를 기본 브랜치에 미러 커밋·푸시
-11. 이슈에 전후 리포트 코멘트
-12. 메인 체크아웃의 기본 브랜치 최신화
-13. 다음 행동 선택
+STEPS=1,2,3,4,5,6,7,8,9,11,13
+SKIPPED=10,12
+EVIDENCE_LEVEL=L1
 ```
+
+**`SKIPPED` 를 사용자에게 사유와 함께 보고한다.** 조용히 건너뛰면 "다 했다"로 읽혀서
+안 한 것보다 나쁘다. 줄인 것이 보여야 줄인 것이다.
+
+### 증거 강도
+
+```text
+L0  명령 출력   종료 코드와 출력 원문만. 6·9단계를 아예 돌지 않는다
+L1  실측       수치 전후 비교(computed style, 벤치마크). 캡처는 만들지 않는다
+L2  시각       webp 전후 + 바운딩 박스. 화면 배치 자체가 산출물일 때만
+```
+
+세부와 근거는 `references/scale-and-evidence.md`.
+
+### 전제 도구는 여기서 확인한다
+
+`EVIDENCE_LEVEL=L2` 면 캡처 도구가 있어야 한다. **6단계에 가서 알면 늦다** —
+흐름 한가운데서 100MB 넘는 설치를 결정하게 된다.
+
+```bash
+node -e "import('playwright').then(()=>console.log('playwright ok')).catch(()=>{console.log('playwright 없음');process.exit(1)})"
+node -e "import('sharp').then(()=>console.log('sharp ok')).catch(()=>console.log('sharp 없음 — webp 변환 폴백 필요'))"
+```
+
+없으면 AskUserQuestion 으로 "설치할지 / L1 로 내릴지"를 지금 묻는다.
 
 ## 2단계 — 이슈 수집
 

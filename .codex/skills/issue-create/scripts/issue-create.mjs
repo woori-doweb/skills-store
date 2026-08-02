@@ -32,6 +32,7 @@ import path from 'node:path';
 import process from 'node:process';
 import {
   repoRoot, issueDir, ensureIgnoreBlock, parseIssueNumber, WORKSPACE_DIR, STATUS_ORDER, typeLabels, isStatusLabel,
+  detectProfile,
 } from './issue-common.mjs';
 import { createTracker, gitHost, setTrackerStatus } from './issue-tracker.mjs';
 
@@ -359,6 +360,34 @@ function cmdCreate(root, opts, tracker) {
   console.log(`NEXT=/issue-start #${number}`);
 }
 
+/* ---------------------------------------------------------------- profile */
+
+/**
+ * 저장소 규모 프로파일을 판정한다. `gate` 가 "이슈를 만들 저장소인가"라면
+ * 이쪽은 "얼마나 무겁게 할 것인가"다. 한 번 정해 `.issue/settings.json` 에 남기고
+ * issue-start / issue-end / issue-merge 가 같은 값을 읽는다.
+ */
+function cmdProfile(root, tracker, opts) {
+  const repo = gitHost.repoInfo(root);
+  const result = detectProfile(root, {
+    isPrivate: typeof repo?.isPrivate === 'boolean' ? repo.isPrivate : null,
+    explicit: opts.profile ?? null,
+  });
+
+  console.log(`프로파일: ${result.profile} (${result.source})`);
+  for (const reason of result.reasons) console.log(`  - ${reason}`);
+  if (result.signals) {
+    const s = result.signals;
+    console.log('신호:');
+    console.log(`  활동 기여자 ${s.activeContributors}명 (전체 ${s.contributors}) / 커밋 ${s.commits}`);
+    console.log(`  공개=${s.isPrivate === null ? '모름' : !s.isPrivate} CI=${s.hasCi} PR템플릿=${s.hasPrTemplate} 이슈템플릿=${s.hasIssueTemplate}`);
+  }
+  console.log('');
+  console.log(`PROFILE=${result.profile}`);
+  console.log(`PROFILE_SOURCE=${result.source}`);
+  console.log(`IS_PRIVATE=${repo?.isPrivate === true ? 1 : 0}`);
+}
+
 /* ------------------------------------------------------------------- main */
 
 function main() {
@@ -366,7 +395,7 @@ function main() {
   if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage(argv.length ? 0 : 1);
 
   const mode = argv[0];
-  if (!['gate', 'search', 'labels', 'create', 'unlabeled', 'label', 'ensure-label', 'status'].includes(mode)) {
+  if (!['gate', 'profile', 'search', 'labels', 'create', 'unlabeled', 'label', 'ensure-label', 'status'].includes(mode)) {
     console.error(`✗ 알 수 없는 모드: ${mode}`);
     usage();
   }
@@ -389,6 +418,7 @@ function main() {
     else if (arg === '--color') opts.color = argv[++i];
     else if (arg === '--desc') opts.desc = argv[++i];
     else if (arg === '--repo') opts.repo = argv[++i];
+    else if (arg === '--profile') opts.profile = argv[++i];
     else if (arg.startsWith('-')) {
       console.error(`✗ 알 수 없는 옵션: ${arg}`);
       usage();
@@ -402,7 +432,7 @@ function main() {
 
   // 이슈를 실제로 건드리는 모드는 인증이 안 되어 있으면 먼저 멈춘다.
   // gate 는 인증 실패도 신호의 하나라 통과시킨다.
-  if (mode !== 'gate' && tracker.provider === 'jira' && !opts.dryRun && !(mode === 'create' && !typeLabels(opts.labels).length && !opts.noLabel)) {
+  if (!['gate', 'profile'].includes(mode) && tracker.provider === 'jira' && !opts.dryRun && !(mode === 'create' && !typeLabels(opts.labels).length && !opts.noLabel)) {
     const auth = tracker.auth();
     if (!auth.ok) {
       console.error(`✗ ${tracker.provider} 인증 실패: ${auth.detail}`);
@@ -412,6 +442,7 @@ function main() {
   }
 
   if (mode === 'gate') cmdGate(root, tracker);
+  else if (mode === 'profile') cmdProfile(root, tracker, opts);
   else if (mode === 'search') cmdSearch(positional, opts, tracker);
   else if (mode === 'labels') cmdLabels(tracker);
   else if (mode === 'unlabeled') cmdUnlabeled(opts, tracker);

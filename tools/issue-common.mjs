@@ -618,6 +618,204 @@ export function getSubagentModel(flavor) {
   return configured[flavor] ?? defaults[flavor] ?? null;
 }
 
+/* ------------------------------------------- 저장소 규모와 증거 강도 */
+
+/**
+ * 저장소 규모 프로파일.
+ *
+ *   solo  리뷰어가 따로 없는 저장소. 절차는 유지하되 의례를 줄인다.
+ *   team  남이 나중에 읽을 것이 확실한 저장소. 전체 절차를 그대로 쓴다.
+ *
+ * `gate` 가 "이슈를 만들 저장소인가"를 판정한다면 이쪽은 "얼마나 무겁게 할 것인가"를 정한다.
+ * 둘은 독립이다 — solo 라도 이슈는 만든다. 달라지는 것은 증거와 산문의 양이다.
+ */
+export const PROJECT_PROFILES = ['solo', 'team'];
+
+/** 증거 강도. 위로 갈수록 만드는 비용이 커진다. */
+export const EVIDENCE_LEVELS = ['L0', 'L1', 'L2'];
+
+/**
+ * 규모 판정에 쓰는 신호를 모은다. 전부 로컬 git·파일 시스템에서 읽는다.
+ *
+ * isPrivate 만 호출부가 넘긴다(gh 호출이 필요해서). 모르면 null 로 두고 판정에서 뺀다.
+ */
+export function collectScaleSignals(root, { isPrivate = null } = {}) {
+  const at = (...p) => path.join(root, ...p);
+  const authors = git(['log', '--all', '--format=%ae'], { cwd: root });
+  const tally = new Map();
+  if (authors.code === 0) {
+    for (const line of authors.out.split('\n')) {
+      const email = line.trim().toLowerCase();
+      if (email) tally.set(email, (tally.get(email) ?? 0) + 1);
+    }
+  }
+  // 커밋 1개짜리 저자는 세지 않는다. 초기 임포트나 스캐폴딩 커밋 하나로
+  // 1인 저장소가 team 으로 넘어가는 오판이 실제로 난다.
+  const activeContributors = [...tally.values()].filter((n) => n >= 2).length;
+  const countOut = git(['rev-list', '--count', 'HEAD'], { cwd: root });
+  const commits = countOut.code === 0 ? Number(countOut.out.trim()) || 0 : 0;
+
+  return {
+    contributors: tally.size,
+    activeContributors,
+    commits,
+    isPrivate,
+    hasCi: existsSync(at('.github', 'workflows')) || existsSync(at('.gitlab-ci.yml')),
+    hasPrTemplate: existsSync(at('.github', 'PULL_REQUEST_TEMPLATE.md'))
+      || existsSync(at('.github', 'pull_request_template.md'))
+      || existsSync(at('.github', 'PULL_REQUEST_TEMPLATE')),
+    hasIssueTemplate: existsSync(at('.github', 'ISSUE_TEMPLATE')),
+  };
+}
+
+/**
+ * 신호에서 프로파일을 도출한다. 하나라도 team 신호가 있으면 team 이다.
+ *
+ * 애매할 때 team 으로 기울이는 것은 의도한 것이다.
+ * 과하게 남긴 증거는 낭비지만, 남이 읽어야 할 때 없는 증거는 되돌릴 수 없다.
+ */
+export function profileFromSignals(signals) {
+  const reasons = [];
+  if (signals.activeContributors > 1) reasons.push(`활동 기여자 ${signals.activeContributors}명`);
+  if (signals.hasCi) reasons.push('CI 설정 있음');
+  if (signals.hasPrTemplate) reasons.push('PR 템플릿 있음');
+  if (signals.hasIssueTemplate) reasons.push('이슈 템플릿 있음');
+  if (signals.isPrivate === false) reasons.push('공개 저장소');
+  if (reasons.length > 0) return { profile: 'team', reasons };
+  return {
+    profile: 'solo',
+    reasons: [`리뷰어 신호 없음 — 활동 기여자 ${signals.activeContributors}명, CI·템플릿 없음, 비공개`],
+  };
+}
+
+/** 기록된 프로파일. 미결정이면 null — 호출부가 detectProfile 로 판정한다. */
+export function getProfile(root) {
+  const profile = readProjectSettings(root).project?.profile;
+  return PROJECT_PROFILES.includes(profile) ? profile : null;
+}
+
+export function setProfile(root, profile, signals = null) {
+  if (!PROJECT_PROFILES.includes(profile)) {
+    fail(`알 수 없는 프로파일: ${profile} (가능: ${PROJECT_PROFILES.join(', ')})`);
+  }
+  const prev = readProjectSettings(root).project ?? {};
+  return writeProjectSettings(root, {
+    project: {
+      ...prev, profile, signals: signals ?? prev.signals ?? null, decidedAt: new Date().toISOString(),
+    },
+  });
+}
+
+/**
+ * 프로파일을 정한다. 이미 기록돼 있으면 그것을 쓰고 다시 판정하지 않는다.
+ * 저장소 성격은 자주 바뀌지 않고, 실행마다 값이 흔들리면 증거 기준도 흔들린다.
+ */
+export function detectProfile(root, { isPrivate = null, explicit = null, persist = true } = {}) {
+  if (explicit) {
+    if (!PROJECT_PROFILES.includes(explicit)) {
+      fail(`알 수 없는 프로파일: ${explicit} (가능: ${PROJECT_PROFILES.join(', ')})`);
+    }
+    if (persist) setProfile(root, explicit);
+    return { profile: explicit, source: 'explicit', reasons: ['호출부 지정'], signals: null };
+  }
+  const recorded = getProfile(root);
+  if (recorded) {
+    return {
+      profile: recorded,
+      source: 'project',
+      reasons: ['.issue/settings.json 에 기록됨'],
+      signals: readProjectSettings(root).project?.signals ?? null,
+    };
+  }
+  const signals = collectScaleSignals(root, { isPrivate });
+  const { profile, reasons } = profileFromSignals(signals);
+  if (persist) setProfile(root, profile, signals);
+  return { profile, source: 'detected', reasons, signals };
+}
+
+/**
+ * 변경 규모. base 가 없으면 워킹트리 전체를 본다.
+ *
+ * 작업 폴더(`.issue/**`)는 제외한다. 증거를 변경분으로 세면
+ * 증거가 규모를 키우고 커진 규모가 다시 더 많은 증거를 요구하는
+ * 되먹임이 생긴다 — 캡처 두 장 때문에 12파일 419줄로 잡히는 식이다.
+ */
+export function changeScale(root, base) {
+  const exclude = [`:!${WORKSPACE_DIR}`, `:!${LEGACY_WORKSPACE_DIR}`, `:!${LEGACY_EVIDENCE_DIR}`];
+  const range = base ? [`${base}...HEAD`] : ['HEAD'];
+  const res = git(['diff', '--numstat', ...range, '--', ...exclude], { cwd: root });
+  if (res.code !== 0) return { files: 0, lines: 0, measured: false };
+  let files = 0;
+  let lines = 0;
+  for (const row of res.out.split('\n')) {
+    const m = row.trim().match(/^(\d+|-)\t(\d+|-)\t/);
+    if (!m) continue;
+    files += 1;
+    lines += (m[1] === '-' ? 0 : Number(m[1])) + (m[2] === '-' ? 0 : Number(m[2]));
+  }
+  return { files, lines, measured: true };
+}
+
+/**
+ * 증거 강도를 제안한다. 강제가 아니라 기본값이고, 호출부가 사유와 함께 올릴 수 있다.
+ *
+ *   L0  명령 출력   종료 코드와 출력 원문만. 문서·설정·소규모 변경의 기본값
+ *   L1  실측       수치 전후 비교. 구현자의 "이렇게 될 것이다"가 완료 기준에 들어갈 때
+ *   L2  시각       webp 전후 + 바운딩 박스. 화면 배치 자체가 산출물일 때
+ *
+ * L1 의 방아쇠가 inferredBehavior 다. 이것이 가장 자주 빠뜨리는 축이다 —
+ * 규모가 작아도 추론이 근거로 쓰이면 그 추론은 재야 한다.
+ * CSS 오류 복구, 캐시 무효화, 동시성처럼 "그럴 것 같다"가 자주 틀리는 영역이 여기 해당한다.
+ */
+export function suggestEvidenceLevel({
+  profile = 'team',
+  kind = 'neither',
+  files = 0,
+  lines = 0,
+  inferredBehavior = false,
+  isPrivate = false,
+} = {}) {
+  const reasons = [];
+  let level = 'L0';
+
+  if (inferredBehavior) {
+    level = 'L1';
+    reasons.push('완료 기준에 추론된 동작이 있어 실측이 필요하다');
+  }
+
+  // 규모가 증거 종류를 정한다. 프로파일은 여기 끼어들지 않는다 —
+  // 팀 저장소라고 3줄 수정에 스크린샷이 더 유용해지지는 않는다.
+  // 숫자로 증명되는 것을 그림으로 한 번 더 보여주는 것은 반복이지 증거가 아니다.
+  const visual = kind === 'frontend' || kind === 'both';
+  const small = files <= 3 && lines <= 30;
+  if (visual && !small) {
+    level = 'L2';
+    reasons.push(`화면 변경 ${files}파일 ${lines}줄 — 배치를 눈으로 봐야 한다`);
+  } else if (visual && level === 'L1') {
+    reasons.push(`화면 변경이지만 ${files}파일 ${lines}줄로 좁아 실측으로 대신한다`);
+  } else if (visual) {
+    level = 'L1';
+    reasons.push(`화면 변경 ${files}파일 ${lines}줄 — 좁은 범위라 해당 속성만 실측한다`);
+  }
+
+  if (level === 'L0') {
+    reasons.push(`${kind} 변경 ${files}파일 ${lines}줄 — 명령 출력으로 충분하다`);
+  }
+
+  return {
+    level,
+    reasons,
+    // 프로파일이 정하는 것은 증거의 종류가 아니라 전달의 양이다.
+    //   산문 정본   solo 는 comment.md 하나. team 도 PR 본문은 코멘트를 참조하고 다시 쓰지 않는다.
+    //   미러       private 은 raw 이미지가 코멘트에서 렌더링되지 않아 의미가 없다.
+    //   승인 게이트 solo 는 마지막에 한 번, team 은 push 와 PR 을 나눠 받는다.
+    proseOnce: true,
+    embedImages: level === 'L2' && !isPrivate,
+    mirrorEvidence: level === 'L2' && !isPrivate,
+    approvalGates: profile === 'solo' ? ['final'] : ['push', 'pr'],
+  };
+}
+
 /**
  * 워크트리 경로를 settings 에 따라 결정한다.
  *
